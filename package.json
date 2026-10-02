@@ -1,0 +1,25 @@
+{
+  "name": "devpath-interview-academy-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DevPath Interview Academy - Production Full-stack Interview Platform",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "build:backend": "npm --prefix backend run build",
+    "build": "npm run build:frontend && npm run build:backend",
+    "test": "npm --prefix backend run test",
+    "lint": "tsc --noEmit --project frontend/tsconfig.json"
+  },
+  "keywords": [
+    "interview-preparation",
+    "algorithms",
+    "system-design",
+    "python",
+    "java",
+    "generative-ai"
+  ],
+  "author": "DevPath Academy Team",
+  "license": "MIT"
+}

@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light palette — drives the `.dark` remapping below. */
+    --surface: 248 250 252; /* slate-50 */
+    --surface-raised: 255 255 255; /* white */
+    --surface-muted: 241 245 249; /* slate-100 */
+    --border: 226 232 240; /* slate-200 */
+    --border-strong: 203 213 225; /* slate-300 */
+    --text-strong: 15 23 42; /* slate-900 */
+    --text: 30 41 59; /* slate-800 */
+    --text-muted: 100 116 139; /* slate-500 */
+  }
+
+  .dark {
+    --surface: 15 23 42; /* slate-900 */
+    --surface-raised: 30 41 59; /* slate-800 */
+    --surface-muted: 39 51 74; /* slate-800/50 family */
+    --border: 51 65 85; /* slate-700 */
+    --border-strong: 71 85 105; /* slate-600 */
+    --text-strong: 241 245 249; /* slate-100 */
+    --text: 226 232 240; /* slate-200 */
+    --text-muted: 148 163 184; /* slate-400 */
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply antialiased font-sans;
+    background-color: rgb(var(--surface));
+    color: rgb(var(--text-strong));
+    min-height: 100vh;
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+
+  /*
+   * Dark-mode safety net.
+   *
+   * Every component now carries explicit `dark:` variants, so these rules are
+   * redundant for current markup and exist only as a backstop for anything added
+   * later without them.
+   *
+   * IMPORTANT: Tailwind 3 flattens its own `@layer base/components/utilities`
+   * directives into unlayered CSS, so writing these inside `@layer base` does
+   * NOT demote them — `.dark .bg-white` has specificity (0,2,0) and would beat
+   * an explicit `.dark\:bg-slate-800\/60` utility at (0,1,0).
+   *
+   * They are therefore wrapped in a *named* cascade layer. Per the CSS cascade
+   * spec, unlayered normal declarations outrank every layered one, so Tailwind's
+   * utilities always win and an explicit `dark:` class is never overridden.
+   */
+}
+
+@layer devpath-dark-fallbacks {
+  .dark body {
+    background-color: rgb(var(--surface));
+    color: rgb(var(--text-strong));
+  }
+
+  .dark .bg-white {
+    background-color: rgb(var(--surface-raised));
+  }
+
+  .dark .bg-slate-50 {
+    background-color: rgb(var(--surface));
+  }
+
+  .dark .bg-slate-100 {
+    background-color: rgb(var(--surface-muted));
+  }
+
+  .dark .text-slate-900 {
+    color: rgb(var(--text-strong));
+  }
+
+  .dark .text-slate-800 {
+    color: rgb(var(--text));
+  }
+
+  .dark .text-slate-700 {
+    color: rgb(var(--text));
+  }
+
+  .dark .text-slate-600 {
+    color: rgb(var(--text-muted));
+  }
+
+  .dark .text-slate-500 {
+    color: rgb(var(--text-muted));
+  }
+
+  .dark .border-slate-300 {
+    border-color: rgb(var(--border-strong));
+  }
+
+  .dark .border-slate-200 {
+    border-color: rgb(var(--border));
+  }
+
+  .dark .border-slate-100 {
+    border-color: rgb(var(--border));
+  }
+}
+
+/* Custom polished scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Code block line numbers and styling */
+pre {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}

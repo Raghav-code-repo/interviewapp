@@ -1,0 +1,369 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// 1. User Account
+model User {
+  id           String            @id @default(uuid())
+  email        String            @unique
+  passwordHash String
+  name         String
+  role         String            @default("candidate") // "candidate" | "admin"
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  profile      CandidateProfile?
+  bookmarks    Bookmark[]
+  progress     LearningProgress[]
+  revisions    RevisionSchedule[]
+  quizAttempts QuizAttempt[]
+  mockSessions MockInterview[]
+
+  @@index([email])
+}
+
+// 2. Candidate Profile
+model CandidateProfile {
+  id                 String           @id @default(uuid())
+  userId             String           @unique
+  user               User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  experienceBand     String           // "0", "0-2", "2-5", "5-8", "8-12", "12-15", "15-20", "20+"
+  experienceYears    Int              @default(2)
+  languagePreference String           @default("both") // "python" | "java" | "both"
+  targetRoleId       String?
+  targetRole         TargetRole?      @relation(fields: [targetRoleId], references: [id])
+  customRoleName     String?
+  goal               String           @default("switch") // "placement" | "switch" | "promotion" | "screening" | "senior" | "learning"
+  dailyGoalQuestions Int              @default(5)
+  customDifficulty   String?          // "beginner" | "intermediate" | "advanced" | "expert"
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([userId])
+}
+
+// 3. Experience Level Definition
+model ExperienceLevel {
+  id          String     @id @default(uuid())
+  band        String     @unique // e.g. "5-8"
+  minYears    Int
+  maxYears    Int
+  title       String     // e.g. "Senior Software Engineer"
+  description String
+  createdAt   DateTime   @default(now())
+
+  @@index([band])
+}
+
+// 4. Target Role
+model TargetRole {
+  id          String             @id @default(uuid())
+  name        String             @unique // e.g. "Backend Engineer"
+  slug        String             @unique
+  description String
+  isCustom    Boolean            @default(false)
+  createdAt   DateTime           @default(now())
+  profiles    CandidateProfile[]
+
+  @@index([slug])
+}
+
+// 5. Taxonomy Category (A-H)
+model Category {
+  id            String    @id @default(uuid())
+  slug          String    @unique // e.g. "python", "java", "dsa", "genai"
+  name          String
+  description   String
+  iconName      String    @default("Folder")
+  badgeColor    String    @default("bg-slate-50")
+  orderIndex    Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  subjects      Subject[]
+  questions     Question[]
+
+  @@index([slug])
+}
+
+// 6. Taxonomy Subject
+model Subject {
+  id          String     @id @default(uuid())
+  categoryId  String
+  category    Category   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String     @unique
+  description String
+  orderIndex  Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  topics      Topic[]
+  questions   Question[]
+
+  @@index([categoryId])
+  @@index([slug])
+}
+
+// 7. Taxonomy Topic
+model Topic {
+  id               String         @id @default(uuid())
+  subjectId        String
+  subject          Subject        @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name             String
+  slug             String         @unique
+  description      String
+  difficulty       String         @default("intermediate") // "beginner" | "intermediate" | "advanced" | "expert"
+  estimatedMinutes Int            @default(30)
+  tags             String[]
+  orderIndex       Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  concepts         Concept[]
+  questions        Question[]
+  quizzes          Quiz[]
+
+  @@index([subjectId])
+  @@index([slug])
+  @@index([difficulty])
+}
+
+// 8. Concept Breakdown
+model Concept {
+  id          String     @id @default(uuid())
+  topicId     String
+  topic       Topic      @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String
+  summary     String
+  keyTakeaway String
+  createdAt   DateTime   @default(now())
+
+  questions   Question[]
+
+  @@index([topicId])
+}
+
+// 9. Question
+model Question {
+  id                     String             @id @default(uuid())
+  slug                   String             @unique
+  title                  String
+  statement              String
+  categoryId             String
+  category               Category           @relation(fields: [categoryId], references: [id])
+  subjectId              String
+  subject                Subject            @relation(fields: [subjectId], references: [id])
+  topicId                String
+  topic                  Topic              @relation(fields: [topicId], references: [id])
+  conceptId              String?
+  concept                Concept?           @relation(fields: [conceptId], references: [id])
+
+  minExperienceYears     Int                @default(0)
+  maxExperienceYears     Int                @default(20)
+  difficulty             String             @default("intermediate")
+  interviewType          String             @default("screening")
+  estimatedTimeMinutes   Int                @default(15)
+  expectedAnswerDepth    String             @default("Practical explanation")
+
+  timeComplexity         String?
+  spaceComplexity        String?
+  commonMistakes         String[]
+  followUpQuestions      String[]
+  prerequisites          String[]
+  tags                   String[]
+  status                 String             @default("published") // "published" | "draft" | "needs_review"
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  answers                Answer[]
+  codeExamples           CodeExample[]
+  bookmarks              Bookmark[]
+  progressItems          LearningProgress[]
+  revisions              RevisionSchedule[]
+  interviewResponses     InterviewResponse[]
+
+  @@index([categoryId])
+  @@index([topicId])
+  @@index([difficulty])
+  @@index([interviewType])
+  @@index([status])
+}
+
+// 10. Question Answer Content
+model Answer {
+  id                   String     @id @default(uuid())
+  questionId           String
+  question             Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  shortAnswer          String     // 2-minute pitch
+  detailedExplanation  String
+  practicalExample     String?
+  juniorExpectation    String?
+  midExpectation       String?
+  seniorExpectation    String?
+  staffExpectation     String?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  @@index([questionId])
+}
+
+// 11. Code Example (Python & Java)
+model CodeExample {
+  id          String     @id @default(uuid())
+  questionId  String
+  question    Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  language    String     // "python" | "java"
+  title       String
+  codeSnippet String
+  explanation String?
+  isRunnable  Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+
+  @@index([questionId, language])
+}
+
+// 12. Quiz Suite
+model Quiz {
+  id               String         @id @default(uuid())
+  topicId          String?
+  topic            Topic?         @relation(fields: [topicId], references: [id])
+  title            String
+  description      String
+  timeLimitMinutes Int            @default(10)
+  createdAt        DateTime       @default(now())
+
+  questions        QuizQuestion[]
+  attempts         QuizAttempt[]
+
+  @@index([topicId])
+}
+
+// 13. Quiz Question
+model QuizQuestion {
+  id                 String       @id @default(uuid())
+  quizId             String
+  quiz               Quiz         @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  prompt             String
+  type               String       @default("multiple_choice") // "multiple_choice" | "true_false" | "code_output"
+  codeSnippet        String?
+  snippetLanguage    String?
+  options            String[]
+  correctOptionIndex Int
+  explanation        String
+  difficulty         String       @default("intermediate")
+  createdAt          DateTime     @default(now())
+
+  @@index([quizId])
+}
+
+// 14. Quiz Attempt Record
+model QuizAttempt {
+  id               String     @id @default(uuid())
+  quizId           String
+  quiz             Quiz       @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  score            Int
+  totalQuestions   Int
+  percentage       Float
+  timeSpentSeconds Int
+  answersJson      Json
+  completedAt      DateTime   @default(now())
+
+  @@index([userId])
+  @@index([quizId])
+}
+
+// 15. Mock Interview Session
+model MockInterview {
+  id              String              @id @default(uuid())
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetRole      String
+  experienceBand  String
+  durationMinutes Int                 @default(30)
+  status          String              @default("completed") // "in_progress" | "completed"
+  overallScore    Float?
+  summaryFeedback String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  responses       InterviewResponse[]
+
+  @@index([userId])
+}
+
+// 16. Mock Interview Response
+model InterviewResponse {
+  id               String        @id @default(uuid())
+  mockInterviewId  String
+  mockInterview    MockInterview @relation(fields: [mockInterviewId], references: [id], onDelete: Cascade)
+  questionId       String
+  question         Question      @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  candidateAnswer  String
+  timeSpentSeconds Int           @default(0)
+  score            Float?        // 0.0 - 10.0
+  strengths        String[]
+  areasToImprove   String[]
+  aiDisclaimer     String        @default("Simulated evaluation")
+  createdAt        DateTime      @default(now())
+
+  @@index([mockInterviewId])
+  @@index([questionId])
+}
+
+// 17. Candidate Bookmark
+model Bookmark {
+  id         String     @id @default(uuid())
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  createdAt  DateTime   @default(now())
+
+  @@unique([userId, questionId])
+  @@index([userId])
+  @@index([questionId])
+}
+
+// 18. Candidate Learning Progress
+model LearningProgress {
+  id              String     @id @default(uuid())
+  userId          String
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questionId      String
+  question        Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  status          String     @default("in_progress") // "not_started" | "in_progress" | "mastered"
+  confidenceScore Int?       // 1 - 5
+  lastAttemptedAt DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@unique([userId, questionId])
+  @@index([userId])
+  @@index([questionId])
+}
+
+// 19. Spaced Revision Schedule
+model RevisionSchedule {
+  id          String     @id @default(uuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questionId  String
+  question    Question   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  dueDate     DateTime
+  intervalDays Int       @default(3)
+  isCompleted Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([userId, questionId])
+  @@index([userId])
+  @@index([dueDate])
+}
