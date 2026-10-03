@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Settings,
   Plus,
@@ -14,25 +14,131 @@ import {
   Filter,
   Layers,
   Sparkles,
+  Database,
+  FileJson,
+  Check,
 } from 'lucide-react';
-import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
+import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
-import { Badge } from '../ui/Badge';
 import { Modal } from '../ui/Modal';
 import { Input } from '../ui/Input';
 import { QUESTIONS, CATEGORIES, TOPICS } from '../../data/seedData';
-import { Question, DifficultyLevel, InterviewType } from '../../types';
+import { Question, DifficultyLevel } from '../../types';
 import { getDifficultyColor } from '../../utils/cn';
+import { apiRequest } from '../../services/api';
+import { repairShiftedQuestionFields, type ImportRepair } from '../../utils/importNormalize';
+
+const STORAGE_KEY = 'devpath_admin_custom_questions';
+
+/** Mirrors the summary returned by POST /api/admin/questions/bulk. */
+interface ImportSummaryResponse {
+  requested: number;
+  imported: number;
+  created: number;
+  updated: number;
+  failed: { index: number; title?: string; reason: string }[];
+}
 
 export const AdminStudio: React.FC = () => {
-  const [questionsList, setQuestionsList] = useState<Question[]>(QUESTIONS);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Initialize questions by merging seed questions with any saved in localStorage
+  const [questionsList, setQuestionsList] = useState<Question[]>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const custom: Question[] = JSON.parse(stored);
+        if (Array.isArray(custom) && custom.length > 0) {
+          const map = new Map<string, Question>();
+          custom.forEach((q) => map.set(q.id, q));
+          QUESTIONS.forEach((q) => {
+            if (!map.has(q.id)) map.set(q.id, q);
+          });
+          return Array.from(map.values());
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to parse cached questions from localStorage', e);
+    }
+    return QUESTIONS;
+  });
+
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'published' | 'draft' | 'needs_review'>('all');
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+
+  // Import / Export state
   const [importExportModal, setImportExportModal] = useState(false);
+  const [importTab, setImportTab] = useState<'file' | 'paste'>('file');
   const [importJsonText, setImportJsonText] = useState('');
-  const [exportNotice, setExportNotice] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
+  const [parsedPreviewCount, setParsedPreviewCount] = useState<number | null>(null);
+  const [parsedDataToImport, setParsedDataToImport] = useState<Question[] | null>(null);
+  const [importRepairs, setImportRepairs] = useState<ImportRepair[]>([]);
+  const [importError, setImportError] = useState<string | null>(null);
+
+  const [feedbackNotice, setFeedbackNotice] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
+
+  // Synchronize questions to localStorage whenever questionsList changes
+  const persistQuestions = (updatedList: Question[]) => {
+    setQuestionsList(updatedList);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedList));
+    } catch (e) {
+      console.warn('Failed to persist questions to localStorage', e);
+    }
+  };
+
+  /**
+   * Replaces the list with the database's contents. The database is
+   * authoritative; localStorage is only a paint-fast cache and offline fallback,
+   * so this runs on mount and after every successful write.
+   *
+   * Returns false when the fetch failed so callers can report that the grid they
+   * are looking at is stale rather than assuming the write round-tripped.
+   */
+  const refreshFromServer = async (): Promise<boolean> => {
+    try {
+      const data = await apiRequest<Question[]>('/admin/export');
+      if (!Array.isArray(data)) return false;
+
+      setQuestionsList(data);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } catch (e) {
+        console.warn('Failed to refresh localStorage cache', e);
+      }
+      return true;
+    } catch (err) {
+      console.warn('Failed to load questions from the database', err);
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const loaded = await refreshFromServer();
+      if (!cancelled && !loaded) {
+        showNotification(
+          'info',
+          'Could not reach the database — showing cached Studio data. Edits will not persist until the API is available.'
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally runs once: later refreshes are explicit, after each write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Form states
   const [title, setTitle] = useState('');
@@ -45,6 +151,8 @@ export const AdminStudio: React.FC = () => {
   const [minExp, setMinExp] = useState(2);
   const [maxExp, setMaxExp] = useState(10);
   const [status, setStatus] = useState<'published' | 'draft' | 'needs_review'>('published');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   const filteredQuestions = questionsList.filter((q) => {
     if (searchQuery.trim()) {
@@ -56,6 +164,11 @@ export const AdminStudio: React.FC = () => {
     if (filterStatus !== 'all' && q.status !== filterStatus) return false;
     return true;
   });
+
+  const showNotification = (type: 'success' | 'error' | 'info', message: string) => {
+    setFeedbackNotice({ type, message });
+    setTimeout(() => setFeedbackNotice(null), 4500);
+  };
 
   const handleOpenCreate = () => {
     setEditingQuestion(null);
@@ -76,8 +189,8 @@ export const AdminStudio: React.FC = () => {
     setEditingQuestion(q);
     setTitle(q.title);
     setStatement(q.statement);
-    setShortAnswer(q.shortAnswer);
-    setDetailedExplanation(q.detailedExplanation);
+    setShortAnswer(q.shortAnswer || '');
+    setDetailedExplanation(q.detailedExplanation || '');
     setCategoryId(q.categoryId);
     setTopicId(q.topicId);
     setDifficulty(q.difficulty);
@@ -87,71 +200,152 @@ export const AdminStudio: React.FC = () => {
     setIsEditorOpen(true);
   };
 
-  const handleSaveQuestion = () => {
-    if (!title.trim() || !statement.trim()) return;
+  // Helper to normalize and sanitize questions from any source
+  const normalizeQuestion = (item: any): Question => {
+    const titleVal = String(item.title || item.question || 'Untitled Question').trim();
+    const slugVal =
+      item.slug ||
+      titleVal
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
 
-    if (editingQuestion) {
-      // Update
-      setQuestionsList((prev) =>
-        prev.map((q) =>
-          q.id === editingQuestion.id
-            ? {
-                ...q,
-                title,
-                statement,
-                shortAnswer,
-                detailedExplanation,
-                categoryId,
-                topicId,
-                difficulty,
-                minExperienceYears: Number(minExp),
-                maxExperienceYears: Number(maxExp),
-                status,
-              }
-            : q
-        )
-      );
-    } else {
-      // Create
-      const newQ: Question = {
-        id: `q-custom-${Date.now()}`,
-        slug: title.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-        title,
-        statement,
-        shortAnswer,
-        detailedExplanation,
-        practicalExample: '',
-        categoryId,
-        subjectId: 'py-fundamentals',
-        topicId,
-        difficulty,
-        interviewType: 'screening',
-        estimatedTimeMinutes: 15,
-        expectedAnswerDepth: 'Comprehensive overview',
-        minExperienceYears: Number(minExp),
-        maxExperienceYears: Number(maxExp),
-        commonMistakes: [],
-        followUpQuestions: [],
-        experienceExpectations: {
-          junior: 'Understands basic concepts',
-          mid: 'Explains trade-offs and runtime behavior',
-          senior: 'Deep architectural discussion',
-          staffOrLead: 'Organizational strategy & fault recovery',
-        },
-        prerequisites: [],
-        tags: [categoryId, difficulty],
-        status,
-      };
-      setQuestionsList((prev) => [newQ, ...prev]);
-    }
+    const catId = item.categoryId || item.category || 'python';
+    const diffVal: DifficultyLevel = ['beginner', 'intermediate', 'advanced', 'expert'].includes(
+      item.difficulty
+    )
+      ? item.difficulty
+      : 'intermediate';
 
-    setIsEditorOpen(false);
+    return {
+      id: item.id || `q-custom-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      slug: slugVal,
+      title: titleVal,
+      statement: String(item.statement || item.description || titleVal),
+      shortAnswer: item.shortAnswer || item.summary || '',
+      detailedExplanation: item.detailedExplanation || item.explanation || '',
+      practicalExample: item.practicalExample || '',
+      categoryId: catId,
+      subjectId: item.subjectId || 'py-fundamentals',
+      topicId: item.topicId || 'topic-py-gil',
+      difficulty: diffVal,
+      interviewType: item.interviewType || 'screening',
+      estimatedTimeMinutes: Number(item.estimatedTimeMinutes || item.timeMinutes || 15),
+      expectedAnswerDepth: item.expectedAnswerDepth || 'Standard overview',
+      minExperienceYears: Number(item.minExperienceYears ?? 0),
+      maxExperienceYears: Number(item.maxExperienceYears ?? 20),
+      timeComplexity: item.timeComplexity || undefined,
+      spaceComplexity: item.spaceComplexity || undefined,
+      commonMistakes: Array.isArray(item.commonMistakes) ? item.commonMistakes : [],
+      followUpQuestions: Array.isArray(item.followUpQuestions) ? item.followUpQuestions : [],
+      experienceExpectations: item.experienceExpectations || {
+        junior: 'Understands basic concepts',
+        mid: 'Explains trade-offs and runtime behavior',
+        senior: 'Deep architectural discussion',
+        staffOrLead: 'Organizational strategy & fault recovery',
+      },
+      prerequisites: Array.isArray(item.prerequisites) ? item.prerequisites : [],
+      tags: Array.isArray(item.tags) && item.tags.length > 0 ? item.tags : [catId, diffVal],
+      status: ['published', 'draft', 'needs_review'].includes(item.status) ? item.status : 'published',
+    };
   };
 
-  const handleDelete = (id: string) => {
-    if (confirm('Are you sure you want to delete this question from the editorial bank?')) {
-      setQuestionsList((prev) => prev.filter((q) => q.id !== id));
+  const handleSaveQuestion = async () => {
+    if (!title.trim() || !statement.trim()) {
+      alert('Question title and problem statement are required.');
+      return;
     }
+
+    setIsSaving(true);
+
+    const questionPayload: Question = editingQuestion
+      ? {
+          ...editingQuestion,
+          title,
+          statement,
+          shortAnswer,
+          detailedExplanation,
+          categoryId,
+          topicId,
+          difficulty,
+          minExperienceYears: Number(minExp),
+          maxExperienceYears: Number(maxExp),
+          status,
+        }
+      : normalizeQuestion({
+          title,
+          statement,
+          shortAnswer,
+          detailedExplanation,
+          categoryId,
+          topicId,
+          difficulty,
+          minExperienceYears: Number(minExp),
+          maxExperienceYears: Number(maxExp),
+          status,
+        });
+
+    if (editingQuestion) {
+      const updated = questionsList.map((q) => (q.id === editingQuestion.id ? questionPayload : q));
+      persistQuestions(updated);
+    } else {
+      persistQuestions([questionPayload, ...questionsList]);
+    }
+
+    // Edits previously POSTed to /admin/questions, which is the create endpoint,
+    // so saving an existing question silently inserted a duplicate row.
+    const endpoint = editingQuestion
+      ? `/admin/questions/${encodeURIComponent(editingQuestion.id)}`
+      : '/admin/questions';
+    const method = editingQuestion ? 'PATCH' : 'POST';
+
+    let failureReason: string | null = null;
+
+    try {
+      await apiRequest(endpoint, { method, body: questionPayload });
+    } catch (err) {
+      failureReason = err instanceof Error ? err.message : String(err);
+    }
+
+    setIsSaving(false);
+    setIsEditorOpen(false);
+
+    if (failureReason) {
+      showNotification(
+        'error',
+        `Not saved to the database — ${failureReason}. The change exists in Studio local storage only.`
+      );
+      return;
+    }
+
+    await refreshFromServer();
+    showNotification(
+      'success',
+      editingQuestion
+        ? 'Question updated and persisted to the database.'
+        : 'Question created and persisted to the database.'
+    );
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this question from the studio?')) return;
+
+    const updated = questionsList.filter((q) => q.id !== id);
+    persistQuestions(updated);
+
+    try {
+      await apiRequest(`/admin/questions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch (err) {
+      // Put the row back: the optimistic local removal did not reach the database.
+      persistQuestions(questionsList);
+      showNotification(
+        'error',
+        `Delete failed — ${err instanceof Error ? err.message : String(err)}. The question was not removed from the database.`
+      );
+      return;
+    }
+
+    showNotification('success', 'Question deleted from the database.');
   };
 
   const handleExportJSON = () => {
@@ -162,24 +356,178 @@ export const AdminStudio: React.FC = () => {
     a.href = url;
     a.download = `devpath-questions-export-${new Date().toISOString().split('T')[0]}.json`;
     a.click();
-    setExportNotice('Questions successfully exported as JSON!');
-    setTimeout(() => setExportNotice(''), 3000);
+    showNotification('success', 'Questions exported as JSON file successfully!');
   };
 
-  const handleImportJSON = () => {
+  const processJsonData = (rawText: string) => {
+    setImportError(null);
     try {
-      const parsed = JSON.parse(importJsonText);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        setQuestionsList(parsed);
-        setImportExportModal(false);
-        setImportJsonText('');
-        alert(`Successfully imported ${parsed.length} questions into the studio repository.`);
-      } else {
-        alert('JSON must be an array of Question objects.');
+      const parsed = JSON.parse(rawText);
+      const rawArray = Array.isArray(parsed) ? parsed : [parsed];
+
+      if (rawArray.length === 0) {
+        setImportError('JSON file contains an empty array.');
+        setParsedDataToImport(null);
+        setParsedPreviewCount(null);
+        setImportRepairs([]);
+        return;
       }
+
+      // Repair before normalizing: normalizeQuestion discards a non-array
+      // followUpQuestions, so the shift has to be undone first or the level
+      // expectations are lost before anything downstream can see them.
+      const seenFields = new Map<string, number>();
+      const firstRepair = new Map<string, ImportRepair>();
+      const normalized: Question[] = rawArray.map((item) => {
+        const { repaired, repairs } = repairShiftedQuestionFields(item);
+        for (const repair of repairs) {
+          const count = (seenFields.get(repair.field) ?? 0) + 1;
+          seenFields.set(repair.field, count);
+          if (count === 1) firstRepair.set(repair.field, repair);
+        }
+        return normalizeQuestion(repaired);
+      });
+
+      setParsedDataToImport(normalized);
+      setParsedPreviewCount(normalized.length);
+      setImportRepairs(
+        Array.from(firstRepair.values()).map((repair) => ({
+          field: repair.field,
+          detail: `${repair.detail} — applied to ${seenFields.get(repair.field)} question(s)`,
+        }))
+      );
     } catch (e: any) {
-      alert('Invalid JSON format: ' + e.message);
+      setImportError(`Invalid JSON format: ${e.message}`);
+      setParsedDataToImport(null);
+      setParsedPreviewCount(null);
+      setImportRepairs([]);
     }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setSelectedFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      setImportJsonText(content);
+      processJsonData(content);
+    };
+    reader.onerror = () => {
+      setImportError('Failed to read the selected file.');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      if (!file.name.endsWith('.json')) {
+        setImportError('Please upload a valid .json file.');
+        return;
+      }
+      setSelectedFileName(file.name);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const content = event.target?.result as string;
+        setImportJsonText(content);
+        processJsonData(content);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleExecuteImport = async () => {
+    if (!parsedDataToImport || parsedDataToImport.length === 0) {
+      if (importJsonText.trim()) {
+        processJsonData(importJsonText);
+      } else {
+        alert('Please choose a .json file or paste JSON content first.');
+        return;
+      }
+    }
+
+    if (!parsedDataToImport || parsedDataToImport.length === 0) return;
+
+    setIsImporting(true);
+    const count = parsedDataToImport.length;
+
+    // Report what the database actually did. The previous version only checked
+    // res.ok, so the missing bulk endpoint 404'd and the user still got a green
+    // "synced to Supabase" toast while the rows lived only in localStorage.
+    let summary: ImportSummaryResponse | null = null;
+    let failureReason: string | null = null;
+
+    try {
+      summary = await apiRequest<ImportSummaryResponse>('/admin/questions/bulk', {
+        method: 'POST',
+        body: parsedDataToImport,
+      });
+    } catch (err) {
+      failureReason = err instanceof Error ? err.message : String(err);
+    }
+
+    // On success the database is authoritative, so re-read rather than merging the
+    // parsed batch locally. On failure mirror into Studio storage so a transient
+    // outage does not force the operator to re-pick the file.
+    if (failureReason) {
+      const currentMap = new Map(questionsList.map((q) => [q.id, q]));
+      parsedDataToImport.forEach((q) => currentMap.set(q.id, q));
+      persistQuestions(Array.from(currentMap.values()));
+    } else {
+      await refreshFromServer();
+    }
+
+    setIsImporting(false);
+    setImportExportModal(false);
+    setImportJsonText('');
+    setSelectedFileName(null);
+    setParsedDataToImport(null);
+    setParsedPreviewCount(null);
+    setImportRepairs([]);
+
+    if (failureReason) {
+      showNotification(
+        'error',
+        `Database write failed — 0 of ${count} questions were persisted. ${failureReason}. They remain in Studio local storage only.`
+      );
+      return;
+    }
+
+    const rejected = summary?.failed.length ?? 0;
+
+    if (rejected > 0) {
+      const first = summary!.failed[0];
+      showNotification(
+        'error',
+        `Imported ${summary!.imported} of ${count} to the database. ${rejected} rejected` +
+          (first?.reason ? ` (e.g. "${first.title}": ${first.reason})` : '') +
+          '. The rejected rows were not saved.'
+      );
+      return;
+    }
+
+    showNotification(
+      'success',
+      `Imported ${count} questions to the database — ${summary?.created ?? 0} created, ${
+        summary?.updated ?? 0
+      } updated.`
+    );
   };
 
   return (
@@ -187,11 +535,16 @@ export const AdminStudio: React.FC = () => {
       {/* Studio Header */}
       <div className="p-6 rounded-2xl bg-panel-light dark:bg-panel-dark border border-slate-200/80 dark:border-slate-700/70 shadow-panel dark:shadow-panel-dark flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight flex items-center gap-2">
-            <Settings className="w-5 h-5 text-brand-600 dark:text-brand-300" /> Admin Content Studio & Taxonomy CMS
-          </h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight flex items-center gap-2">
+              <Settings className="w-5 h-5 text-brand-600 dark:text-brand-300" /> Admin Content Studio & Taxonomy CMS
+            </h1>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30">
+              <Database className="w-3 h-3" /> {questionsList.length} Questions Active
+            </span>
+          </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Manage editorial review, lifecycle statuses (Draft / Needs Review / Published), question metadata, and bulk import/export.
+            Manage editorial review, lifecycle statuses, Supabase PostgreSQL persistence, and JSON bulk import/export.
           </p>
         </div>
 
@@ -199,8 +552,18 @@ export const AdminStudio: React.FC = () => {
           <Button variant="outline" size="sm" onClick={handleExportJSON} className="text-xs">
             <Download className="w-3.5 h-3.5 mr-1" /> Export JSON
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setImportExportModal(true)} className="text-xs">
-            <Upload className="w-3.5 h-3.5 mr-1" /> Bulk Import
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setImportExportModal(true);
+              setImportError(null);
+              setSelectedFileName(null);
+              setParsedPreviewCount(null);
+            }}
+            className="text-xs bg-brand-50/50 dark:bg-brand-500/10 border-brand-200 dark:border-brand-500/30 text-brand-700 dark:text-brand-300 hover:bg-brand-100"
+          >
+            <Upload className="w-3.5 h-3.5 mr-1" /> Upload / Import JSON
           </Button>
           <Button variant="primary" size="sm" onClick={handleOpenCreate} className="text-xs">
             <Plus className="w-3.5 h-3.5 mr-1" /> Add Question
@@ -208,9 +571,19 @@ export const AdminStudio: React.FC = () => {
         </div>
       </div>
 
-      {exportNotice && (
-        <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 text-xs text-emerald-800 dark:text-emerald-300 font-semibold animate-fade">
-          {exportNotice}
+      {/* Floating Notice */}
+      {feedbackNotice && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 animate-fade shadow-sm ${
+            feedbackNotice.type === 'success'
+              ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-300 dark:border-emerald-500/30 text-emerald-800 dark:text-emerald-300'
+              : feedbackNotice.type === 'error'
+              ? 'bg-rose-50 dark:bg-rose-500/10 border-rose-300 dark:border-rose-500/30 text-rose-800 dark:text-rose-300'
+              : 'bg-indigo-50 dark:bg-indigo-500/10 border-indigo-300 dark:border-indigo-500/30 text-indigo-800 dark:text-indigo-300'
+          }`}
+        >
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{feedbackNotice.message}</span>
         </div>
       )}
 
@@ -223,7 +596,7 @@ export const AdminStudio: React.FC = () => {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search questions in studio..."
-            className="w-full pl-9 pr-4 py-1.5 text-xs bg-slate-50 dark:bg-slate-500/10 border border-slate-200 dark:border-slate-500/30 rounded-lg text-slate-800 dark:text-slate-300 focus:outline-none"
+            className="w-full pl-9 pr-4 py-1.5 text-xs bg-slate-50 dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
           />
         </div>
 
@@ -234,8 +607,8 @@ export const AdminStudio: React.FC = () => {
               onClick={() => setFilterStatus(st)}
               className={`px-3 py-1 text-xs font-semibold rounded-lg capitalize transition-colors ${
                 filterStatus === st
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-slate-100 dark:bg-slate-500/15 text-slate-600 dark:text-slate-300 hover:bg-slate-200 hover:dark:bg-slate-500/20'
+                  ? 'bg-slate-900 text-white dark:bg-brand-600'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 hover:dark:bg-slate-700'
               }`}
             >
               {st.replace('_', ' ')}
@@ -248,7 +621,7 @@ export const AdminStudio: React.FC = () => {
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 dark:bg-slate-500/10 border-b border-slate-200 dark:border-slate-500/30 text-slate-500 dark:text-slate-400 uppercase font-semibold text-[10px]">
+            <thead className="bg-slate-50 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 uppercase font-semibold text-[10px]">
               <tr>
                 <th className="p-3.5">Title & Statement</th>
                 <th className="p-3.5">Category</th>
@@ -258,64 +631,74 @@ export const AdminStudio: React.FC = () => {
                 <th className="p-3.5 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
-              {filteredQuestions.map((q) => {
-                const diffColor = getDifficultyColor(q.difficulty);
-                const parentCat = CATEGORIES.find((c) => c.id === q.categoryId);
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {filteredQuestions.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-8 text-center text-slate-500 dark:text-slate-400">
+                    No questions found matching your filter. Click "Add Question" or "Upload JSON" above.
+                  </td>
+                </tr>
+              ) : (
+                filteredQuestions.map((q) => {
+                  const diffColor = getDifficultyColor(q.difficulty);
+                  const parentCat = CATEGORIES.find((c) => c.id === q.categoryId);
 
-                return (
-                  <tr key={q.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="p-3.5 max-w-sm">
-                      <div className="font-bold text-slate-900 dark:text-slate-100 line-clamp-1">{q.title}</div>
-                      <div className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-1 mt-0.5">{q.statement}</div>
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap text-slate-700 dark:text-slate-300 font-medium">
-                      {parentCat?.name.split(' ')[0] || q.categoryId}
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap">
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase ${diffColor.bg} ${diffColor.text} ${diffColor.border}`}
-                      >
-                        {q.difficulty}
-                      </span>
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap font-mono text-slate-600 dark:text-slate-300">
-                      {q.minExperienceYears}-{q.maxExperienceYears}y
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap">
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                          q.status === 'published'
-                            ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/30'
-                            : q.status === 'needs_review'
-                            ? 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-500/30'
-                            : 'bg-slate-100 dark:bg-slate-500/15 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-500/30'
-                        }`}
-                      >
-                        {q.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap text-right space-x-1">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEdit(q)}
-                        className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-brand-600 hover:dark:text-brand-300 hover:bg-brand-50 hover:dark:bg-brand-500/10 transition-colors"
-                        title="Edit Question"
-                      >
-                        <Edit className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(q.id)}
-                        className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-red-600 hover:dark:text-red-300 hover:bg-red-50 hover:dark:bg-red-500/10 transition-colors"
-                        title="Delete Question"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
+                  return (
+                    <tr key={q.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors">
+                      <td className="p-3.5 max-w-sm">
+                        <div className="font-bold text-slate-900 dark:text-slate-100 line-clamp-1">{q.title}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-1 mt-0.5">
+                          {q.statement}
+                        </div>
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap text-slate-700 dark:text-slate-300 font-medium">
+                        {parentCat?.name.split(' ')[0] || q.categoryId}
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase ${diffColor.bg} ${diffColor.text} ${diffColor.border}`}
+                        >
+                          {q.difficulty}
+                        </span>
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap font-mono text-slate-600 dark:text-slate-300">
+                        {q.minExperienceYears}-{q.maxExperienceYears}y
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            q.status === 'published'
+                              ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-500/30'
+                              : q.status === 'needs_review'
+                              ? 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-500/30'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                          }`}
+                        >
+                          {q.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap text-right space-x-1">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEdit(q)}
+                          className="p-1.5 text-slate-400 hover:text-brand-600 dark:hover:text-brand-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                          title="Edit Question"
+                        >
+                          <Edit className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(q.id)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                          title="Delete Question"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>
@@ -325,33 +708,43 @@ export const AdminStudio: React.FC = () => {
       <Modal
         isOpen={isEditorOpen}
         onClose={() => setIsEditorOpen(false)}
-        title={editingQuestion ? 'Edit Interview Question' : 'Create New Interview Question'}
-        description="Fill in comprehensive technical details, explanations, and experience guidelines."
-        maxWidth="2xl"
+        title={editingQuestion ? 'Edit Editorial Question' : 'Add New Question to Content Bank'}
+        description="Configure taxonomy classification, difficulty, and comprehensive model answers."
       >
-        <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
-          <Input label="Question Title" value={title} onChange={(e) => setTitle(e.target.value)} required />
-
+        <div className="space-y-4 max-h-[75vh] overflow-y-auto pr-1">
           <div>
             <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
-              Question Statement
+              Question Title *
             </label>
-            <textarea
-              rows={2}
-              value={statement}
-              onChange={(e) => setStatement(e.target.value)}
-              className="w-full p-2.5 text-xs bg-white dark:bg-slate-800/70 border border-slate-300 dark:border-slate-500/40 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-              required
+            <Input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Explain Python GIL and Multiprocessing"
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
+              Problem Statement *
+            </label>
+            <textarea
+              rows={3}
+              value={statement}
+              onChange={(e) => setStatement(e.target.value)}
+              placeholder="Detailed interview question prompt..."
+              className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">Domain Category</label>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
+                Category
+              </label>
               <select
                 value={categoryId}
                 onChange={(e) => setCategoryId(e.target.value)}
-                className="w-full p-2 text-xs bg-white dark:bg-slate-800/70 border border-slate-300 dark:border-slate-500/40 rounded-lg"
+                className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none"
               >
                 {CATEGORIES.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -362,11 +755,32 @@ export const AdminStudio: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">Difficulty</label>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
+                Topic
+              </label>
+              <select
+                value={topicId}
+                onChange={(e) => setTopicId(e.target.value)}
+                className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none"
+              >
+                {TOPICS.filter((t) => t.categoryId === categoryId).map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
+                Difficulty
+              </label>
               <select
                 value={difficulty}
-                onChange={(e) => setDifficulty(e.target.value as any)}
-                className="w-full p-2 text-xs bg-white dark:bg-slate-800/70 border border-slate-300 dark:border-slate-500/40 rounded-lg capitalize"
+                onChange={(e) => setDifficulty(e.target.value as DifficultyLevel)}
+                className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none capitalize"
               >
                 <option value="beginner">Beginner</option>
                 <option value="intermediate">Intermediate</option>
@@ -374,27 +788,28 @@ export const AdminStudio: React.FC = () => {
                 <option value="expert">Expert</option>
               </select>
             </div>
-          </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <Input
-              label="Min Exp (Years)"
-              type="number"
-              value={minExp}
-              onChange={(e) => setMinExp(Number(e.target.value))}
-            />
-            <Input
-              label="Max Exp (Years)"
-              type="number"
-              value={maxExp}
-              onChange={(e) => setMaxExp(Number(e.target.value))}
-            />
             <div>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">Editorial Status</label>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
+                Min Exp (Yrs)
+              </label>
+              <Input
+                type="number"
+                min={0}
+                max={25}
+                value={minExp}
+                onChange={(e) => setMinExp(Number(e.target.value))}
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase mb-1">
+                Editorial Status
+              </label>
               <select
                 value={status}
                 onChange={(e) => setStatus(e.target.value as any)}
-                className="w-full p-2 text-xs bg-white dark:bg-slate-800/70 border border-slate-300 dark:border-slate-500/40 rounded-lg capitalize"
+                className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none"
               >
                 <option value="published">Published</option>
                 <option value="needs_review">Needs Review</option>
@@ -411,7 +826,8 @@ export const AdminStudio: React.FC = () => {
               rows={3}
               value={shortAnswer}
               onChange={(e) => setShortAnswer(e.target.value)}
-              className="w-full p-2.5 text-xs bg-white dark:bg-slate-800/70 border border-slate-300 dark:border-slate-500/40 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+              placeholder="Crisp, executive summary of the answer..."
+              className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             />
           </div>
 
@@ -423,43 +839,165 @@ export const AdminStudio: React.FC = () => {
               rows={5}
               value={detailedExplanation}
               onChange={(e) => setDetailedExplanation(e.target.value)}
-              className="w-full p-2.5 text-xs bg-white dark:bg-slate-800/70 border border-slate-300 dark:border-slate-500/40 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/20 font-mono"
+              placeholder="In-depth technical breakdown and trade-offs..."
+              className="w-full p-2.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-brand-500/20 font-mono"
             />
           </div>
 
-          <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-700/60">
+          <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
             <Button variant="outline" size="sm" onClick={() => setIsEditorOpen(false)}>
               Cancel
             </Button>
-            <Button variant="primary" size="sm" onClick={handleSaveQuestion}>
-              Save to Content Bank
+            <Button variant="primary" size="sm" onClick={handleSaveQuestion} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save & Persist Question'}
             </Button>
           </div>
         </div>
       </Modal>
 
-      {/* Bulk Import Modal */}
+      {/* Bulk Import / Upload Modal */}
       <Modal
         isOpen={importExportModal}
         onClose={() => setImportExportModal(false)}
-        title="Bulk JSON Content Import"
-        description="Paste an array of validated Question objects conforming to the DevPath schema."
+        title="Upload or Import Questions JSON"
+        description="Upload a .json file or paste question objects to add them to your content repository."
       >
         <div className="space-y-4">
-          <textarea
-            rows={10}
-            value={importJsonText}
-            onChange={(e) => setImportJsonText(e.target.value)}
-            placeholder="[ { id: '...', title: '...', statement: '...', ... } ]"
-            className="w-full p-3 font-mono text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+          {/* Segmented Tab Bar */}
+          <div className="flex rounded-lg bg-slate-100 dark:bg-slate-800 p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setImportTab('file')}
+              className={`flex-1 py-1.5 font-semibold rounded-md transition-all flex items-center justify-center gap-1.5 ${
+                importTab === 'file'
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              <Upload className="w-3.5 h-3.5" /> Upload .json File
+            </button>
+            <button
+              type="button"
+              onClick={() => setImportTab('paste')}
+              className={`flex-1 py-1.5 font-semibold rounded-md transition-all flex items-center justify-center gap-1.5 ${
+                importTab === 'paste'
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              <FileJson className="w-3.5 h-3.5" /> Paste JSON Text
+            </button>
+          </div>
+
+          {/* Hidden File Input */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            accept=".json,application/json"
+            onChange={handleFileChange}
+            className="hidden"
           />
 
-          <div className="flex justify-end gap-2">
+          {importTab === 'file' ? (
+            /* Drag and Drop Box */
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
+                isDragging
+                  ? 'border-brand-500 bg-brand-50/50 dark:bg-brand-500/10'
+                  : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <div className="flex flex-col items-center justify-center gap-2">
+                <div className="p-3 bg-brand-100 dark:bg-brand-900/40 text-brand-600 dark:text-brand-300 rounded-full">
+                  <FileJson className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                    {selectedFileName ? selectedFileName : 'Drag & drop your .json file here'}
+                  </p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    or click to browse from your computer
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 text-xs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  Browse File
+                </Button>
+              </div>
+            </div>
+          ) : (
+            /* Textarea for Direct Paste */
+            <textarea
+              rows={8}
+              value={importJsonText}
+              onChange={(e) => {
+                setImportJsonText(e.target.value);
+                if (e.target.value.trim()) processJsonData(e.target.value);
+              }}
+              placeholder={`[\n  {\n    "title": "What is Python GIL?",\n    "statement": "Explain reference counting...",\n    "difficulty": "advanced",\n    "categoryId": "python"\n  }\n]`}
+              className="w-full p-3 font-mono text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-brand-500/20 text-slate-900 dark:text-slate-100"
+            />
+          )}
+
+          {/* Validation Status / Error */}
+          {importError && (
+            <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 text-rose-700 dark:text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{importError}</span>
+            </div>
+          )}
+
+          {parsedPreviewCount !== null && !importError && (
+            <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 text-emerald-800 dark:text-emerald-300 text-xs flex items-center justify-between">
+              <span className="flex items-center gap-1.5 font-semibold">
+                <Check className="w-4 h-4 text-emerald-600" />
+                Validated {parsedPreviewCount} question{parsedPreviewCount === 1 ? '' : 's'} ready to import!
+              </span>
+              <span className="text-[10px] uppercase font-bold text-emerald-600">Schema Verified</span>
+            </div>
+          )}
+
+          {importRepairs.length > 0 && !importError && (
+            <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-amber-800 dark:text-amber-300 text-xs space-y-1">
+              <p className="font-semibold flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                Repaired {importRepairs.length} misaligned field(s) before import
+              </p>
+              <ul className="list-disc pl-5 space-y-0.5">
+                {importRepairs.map((repair) => (
+                  <li key={repair.field}>
+                    <code className="font-mono">{repair.field}</code> — {repair.detail}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
             <Button variant="outline" size="sm" onClick={() => setImportExportModal(false)}>
               Cancel
             </Button>
-            <Button variant="primary" size="sm" onClick={handleImportJSON} disabled={!importJsonText.trim()}>
-              Import Questions
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleExecuteImport}
+              disabled={isImporting || !parsedDataToImport || parsedDataToImport.length === 0}
+            >
+              {isImporting
+                ? 'Importing...'
+                : `Import ${parsedPreviewCount ? `${parsedPreviewCount} Questions` : 'Questions'}`}
             </Button>
           </div>
         </div>
