@@ -1,57 +1,42 @@
 import { Router, Request, Response } from 'express';
-import { BACKEND_QUESTIONS } from '../services/seedData';
+import { listQuestions, findQuestionByRef } from '../services/questionStore';
 
 export const questionsRouter = Router();
 
-questionsRouter.get('/questions', (req: Request, res: Response) => {
-  const { category, difficulty, expYears, query } = req.query;
+/**
+ * Reads from Postgres via questionStore, falling back to the bundled in-memory
+ * seed array only when the database is unreachable. `meta.source` tells the
+ * client which one answered, so a degraded response is never mistaken for
+ * authoritative content.
+ */
+questionsRouter.get('/questions', async (req: Request, res: Response) => {
+  const { category, difficulty, expYears, query, status } = req.query;
 
-  let results = [...BACKEND_QUESTIONS];
+  const years = Number(expYears);
 
-  if (category && category !== 'all') {
-    results = results.filter((q) => q.categoryId === category);
-  }
-
-  if (difficulty && difficulty !== 'all') {
-    results = results.filter((q) => q.difficulty === difficulty);
-  }
-
-  if (expYears) {
-    const years = Number(expYears);
-    if (!isNaN(years)) {
-      results = results.filter(
-        (q) => years >= q.minExperienceYears && years <= q.maxExperienceYears
-      );
-    }
-  }
-
-  if (query) {
-    const qStr = String(query).toLowerCase();
-    results = results.filter(
-      (q) =>
-        q.title.toLowerCase().includes(qStr) ||
-        q.statement.toLowerCase().includes(qStr) ||
-        q.tags.some((t) => t.toLowerCase().includes(qStr))
-    );
-  }
+  const { questions, source } = await listQuestions({
+    category: typeof category === 'string' ? category : undefined,
+    difficulty: typeof difficulty === 'string' ? difficulty : undefined,
+    expYears: expYears !== undefined && !Number.isNaN(years) ? years : undefined,
+    query: typeof query === 'string' && query.trim() ? query.trim() : undefined,
+    status: typeof status === 'string' ? status : undefined,
+  });
 
   res.status(200).json({
     success: true,
-    data: results,
+    data: questions,
     meta: {
-      total: results.length,
+      total: questions.length,
+      source,
       timestamp: new Date().toISOString(),
     },
   });
 });
 
-questionsRouter.get('/questions/:idOrSlug', (req: Request, res: Response) => {
-  const param = req.params.idOrSlug;
-  const question = BACKEND_QUESTIONS.find(
-    (q) => q.id === param || q.slug === param
-  );
+questionsRouter.get('/questions/:idOrSlug', async (req: Request, res: Response) => {
+  const result = await findQuestionByRef(req.params.idOrSlug);
 
-  if (!question) {
+  if (!result) {
     return res.status(404).json({
       success: false,
       error: { code: 'NOT_FOUND', message: 'Question not found' },
@@ -60,6 +45,7 @@ questionsRouter.get('/questions/:idOrSlug', (req: Request, res: Response) => {
 
   res.status(200).json({
     success: true,
-    data: question,
+    data: result.question,
+    meta: { source: result.source },
   });
 });
