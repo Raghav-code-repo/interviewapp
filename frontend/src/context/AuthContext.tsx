@@ -42,6 +42,18 @@ interface AuthContextType {
     targetRole: string;
     goal: PreparationGoal;
   }) => Promise<void>;
+  /**
+   * Sends the browser to the backend to begin a Google/Facebook handshake.
+   * Deliberately not an async call: the flow leaves the page entirely and comes
+   * back through the redirect callback.
+   */
+  beginSocialLogin: (provider: 'google' | 'facebook') => void;
+  /**
+   * Completes a social sign-in from the one-time code in the redirect URL.
+   * Returns the signed-in user's name so the caller can decide whether to show
+   * first-time profile setup.
+   */
+  completeSocialLogin: (code: string) => Promise<AuthUser>;
   logout: () => void;
   /** Re-reads the session from the API. Used on boot and after profile edits. */
   refresh: () => Promise<void>;
@@ -67,7 +79,22 @@ const USER_STORAGE_KEY = 'devpath_auth_user';
 function readStoredUser(): AuthUser | null {
   try {
     const raw = localStorage.getItem(USER_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as AuthUser) : null;
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as Partial<AuthUser>;
+    if (!parsed?.id) return null;
+
+    // A session cached before social sign-in existed has no avatar or provider
+    // list. Backfill so the first paint after a reload does not read `undefined`
+    // before /auth/me has replaced it with the real record.
+    return {
+      id: parsed.id,
+      email: parsed.email ?? '',
+      name: parsed.name ?? '',
+      role: parsed.role ?? 'candidate',
+      profileImage: parsed.profileImage ?? null,
+      providers: parsed.providers ?? ['password'],
+    };
   } catch {
     return null;
   }
@@ -227,6 +254,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [applyServerProfile]);
 
+  const beginSocialLogin = useCallback((provider: 'google' | 'facebook') => {
+    // Remember where the user was heading so the callback can return them there.
+    const returnTo = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(authApi.socialStartUrl(provider, returnTo));
+  }, []);
+
+  const completeSocialLogin = useCallback(
+    async (code: string) => {
+      const session = await authApi.socialExchange(code);
+      adoptSession(session);
+      return session.user;
+    },
+    [adoptSession]
+  );
+
   const syncProfile = useCallback<AuthContextType['syncProfile']>(
     (changes) => {
       if (!getStoredToken()) return;
@@ -251,11 +293,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isAuthenticated: status === 'authenticated' && Boolean(user),
       login,
       register,
+      beginSocialLogin,
+      completeSocialLogin,
       logout: clearSession,
       refresh,
       syncProfile,
     }),
-    [status, user, token, login, register, clearSession, refresh, syncProfile]
+    [
+      status,
+      user,
+      token,
+      login,
+      register,
+      beginSocialLogin,
+      completeSocialLogin,
+      clearSession,
+      refresh,
+      syncProfile,
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

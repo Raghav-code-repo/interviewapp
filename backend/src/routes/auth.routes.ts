@@ -1,4 +1,4 @@
-import { Router, Response, NextFunction } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -11,8 +11,22 @@ import {
   findUserById,
   updateUserProfile,
   toPublicUser,
+  linkSocialIdentity,
+  SocialLinkUnavailableError,
+  SocialAccountLinkRequiredError,
   UserRecord,
 } from '../services/userStore';
+import {
+  OAuthError,
+  buildAuthorizationUrl,
+  completeAuthorization,
+  consumeState,
+  createState,
+  grantSocialSession,
+  isSocialProvider,
+  redeemSocialSession,
+  type SocialProvider,
+} from '../services/oauth';
 import {
   DEFAULT_EXPERIENCE_BAND,
   EXPERIENCE_BANDS,
@@ -55,6 +69,10 @@ const LoginSchema = z.object({
   password: z.string().min(1, 'Password is required.'),
 });
 
+const SocialCodeSchema = z.object({
+  code: z.string().min(10).max(200),
+});
+
 const UpdateProfileSchema = z.object({
   experienceBand: z.string().refine(isExperienceBand).optional(),
   language: z.enum(['python', 'java', 'both']).optional(),
@@ -86,7 +104,8 @@ const DUMMY_HASH = bcrypt.hashSync('devpath-timing-equalizer', 10);
 async function verifyPassword(user: UserRecord | null, password: string): Promise<boolean> {
   const hash = user?.passwordHash ?? DUMMY_HASH;
   const matches = await bcrypt.compare(password, hash);
-  return user !== null && matches;
+  // A social-only account has no hash, so it can never satisfy a password check.
+  return user !== null && user.passwordHash !== null && matches;
 }
 
 authRouter.post('/register', async (req, res: Response, next: NextFunction) => {
@@ -257,4 +276,187 @@ authRouter.get('/meta', (_req, res: Response) => {
       })),
     },
   });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Social sign-in (Google / Facebook)                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which providers this deployment can actually serve.
+ *
+ * The SPA reads this to hide buttons that would fail, rather than letting a user
+ * click "Continue with Google" on a server with no Google credentials.
+ */
+authRouter.get('/providers', (_req, res: Response) => {
+  res.status(200).json({
+    success: true,
+    data: {
+      google: config.google.isConfigured,
+      facebook: config.facebook.isConfigured,
+    },
+  });
+});
+
+/** Starts the server-side OAuth handshake for a provider. */
+function socialStart(provider: SocialProvider) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const state = createState(typeof req.query.returnTo === 'string' ? req.query.returnTo : null);
+      res.redirect(302, buildAuthorizationUrl(provider, state));
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
+authRouter.get('/google', socialStart('google'));
+authRouter.get('/facebook', socialStart('facebook'));
+
+/**
+ * The SPA route that completes a social sign-in.
+ *
+ * It is the only place the one-time code is exchanged for a JWT, so a callback
+ * that lands anywhere else leaves the browser with no session at all.
+ */
+const SOCIAL_CALLBACK_PATH = '/auth/social/callback';
+
+/**
+ * Where the SPA picks up after the provider redirect.
+ *
+ * This MUST resolve to {@link SOCIAL_CALLBACK_PATH}. Redirecting to the bare
+ * frontend origin instead drops the browser on `/` — the protected dashboard —
+ * which has no session yet and immediately bounces to /login, so the sign-in
+ * appears to succeed but never completes.
+ *
+ * `FRONTEND_URL` is a server-side value, so the target cannot be steered by a
+ * client; only a relative `returnTo` travels through the browser, and the client
+ * validates that before honouring it. Both forms of `FRONTEND_URL` (bare origin,
+ * or origin with the callback path already appended) resolve to the same route.
+ */
+function socialRedirect(res: Response, params: Record<string, string>): void {
+  const target = new URL(config.frontendUrl);
+  if (target.pathname === '' || target.pathname === '/') {
+    target.pathname = SOCIAL_CALLBACK_PATH;
+  }
+  for (const [key, value] of Object.entries(params)) {
+    target.searchParams.set(key, value);
+  }
+  res.redirect(302, target.toString());
+}
+
+function socialCallback(provider: SocialProvider) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // The provider reports user-facing refusals here (e.g. "decline"), which is
+      // not an error condition on our side.
+      if (typeof req.query.error === 'string') {
+        const description =
+          typeof req.query.error_description === 'string'
+            ? req.query.error_description
+            : req.query.error;
+        return socialRedirect(res, { socialError: description });
+      }
+
+      const code = typeof req.query.code === 'string' ? req.query.code : '';
+      const state = typeof req.query.state === 'string' ? req.query.state : '';
+
+      // Fail closed: an unrecognised state could be a forged callback.
+      const stateResult = consumeState(state);
+      if (!stateResult.valid) {
+        return socialRedirect(res, {
+          socialError: 'Your sign-in session expired or was invalid. Please try again.',
+        });
+      }
+
+      const identity = await completeAuthorization(provider, code);
+      const { user, outcome } = await linkSocialIdentity({
+        provider: identity.provider,
+        providerAccountId: identity.providerAccountId,
+        email: identity.email,
+        name: identity.name,
+        profileImage: identity.profileImage,
+      });
+
+      // Reuse the application's existing JWT — no second token architecture.
+      const token = issueToken(user);
+      const handoff = grantSocialSession(token);
+
+      console.log(
+        `[auth] ${provider} sign-in: user=${user.id} outcome=${outcome} providers=${user.providers.join(',')}`
+      );
+
+      return socialRedirect(res, {
+        socialCode: handoff,
+        returnTo: stateResult.returnTo ?? '',
+        socialNewUser: outcome === 'created' ? '1' : '',
+      });
+    } catch (err) {
+      if (err instanceof OAuthError) {
+        console.warn(`[auth] ${provider} sign-in failed: ${err.code}`);
+        return socialRedirect(res, { socialError: err.message });
+      }
+      if (err instanceof SocialAccountLinkRequiredError) {
+        console.warn(`[auth] ${provider} sign-in requires account linking: ${err.message}`);
+        return socialRedirect(res, { socialError: err.message });
+      }
+      if (err instanceof SocialLinkUnavailableError) {
+        return socialRedirect(res, { socialError: err.message });
+      }
+      return next(err);
+    }
+  };
+}
+
+authRouter.get('/google/callback', socialCallback('google'));
+authRouter.get('/facebook/callback', socialCallback('facebook'));
+
+/**
+ * Trades the one-time handoff code for a normal session.
+ *
+ * The code is single-use and expires in ~60s, so it is safe to have travelled
+ * through the browser during the redirect. From here on the client behaves
+ * exactly as it does after an email/password login.
+ */
+authRouter.post('/social/exchange', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { code } = SocialCodeSchema.parse(req.body);
+    const token = redeemSocialSession(code);
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'INVALID_SOCIAL_CODE',
+          message: 'This sign-in link has expired. Please try again.',
+        },
+      });
+    }
+
+    // Re-read the user rather than trusting the token payload, so a deleted or
+    // changed account cannot be resurrected by a valid-looking code.
+    const claims = jwt.verify(token, config.jwtSecret) as { id?: string };
+    const user = claims.id ? await findUserById(claims.id) : null;
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'ACCOUNT_NOT_FOUND',
+          message: 'The account for this session no longer exists.',
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        token,
+        user: toPublicUser(user),
+        profile: user.profile,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });

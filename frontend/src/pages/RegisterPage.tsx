@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { AlertCircle, UserPlus } from 'lucide-react';
 import { AuthLayout } from '../components/auth/AuthLayout';
+import { SocialAuthButtons } from '../components/auth/SocialAuthButtons';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Select, SelectOption } from '../components/ui/Select';
@@ -296,6 +297,8 @@ export const RegisterPage: React.FC = () => {
           {!isSubmitting && <UserPlus className="w-4 h-4" />}
           {isSubmitting ? 'Creating account...' : 'Create account'}
         </Button>
+
+        <SocialAuthButtons mode="register" />
 
         <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
           Your password is hashed with bcrypt before it is stored, and is never returned by the

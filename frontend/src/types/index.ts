@@ -43,12 +43,19 @@ export type InterviewType =
 /* Authentication                                                             */
 /* -------------------------------------------------------------------------- */
 
+/** Login methods that can back an account. */
+export type AuthProvider = 'password' | 'google' | 'facebook';
+
 /** The authenticated account, as returned by the API. Never includes secrets. */
 export interface AuthUser {
   id: string;
   email: string;
   name: string;
   role: string;
+  /** Provider avatar, when one was supplied at sign-in. */
+  profileImage: string | null;
+  /** Which login methods work for this account. */
+  providers: AuthProvider[];
 }
 
 /**

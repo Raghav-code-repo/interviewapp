@@ -138,6 +138,28 @@ export const authApi = {
 
   me: () => apiRequest<{ user: AuthSession['user']; profile: ServerProfile }>('/auth/me'),
 
+  /** Which social providers this deployment has credentials for. */
+  socialProviders: () =>
+    apiRequest<{ google: boolean; facebook: boolean }>('/auth/providers', { auth: false }),
+
+  /**
+   * Trades the one-time code from the OAuth redirect for a normal session.
+   *
+   * The code is single-use and short-lived, which is why it is safe for it to
+   * have travelled in the redirect URL. The result is identical in shape to a
+   * password login, so the rest of the app is unaffected by how the user signed in.
+   */
+  socialExchange: (code: string) =>
+    apiRequest<AuthSession>('/auth/social/exchange', { method: 'POST', body: { code }, auth: false }),
+
+  /** Full-page URL that starts the server-side OAuth handshake. */
+  socialStartUrl: (provider: 'google' | 'facebook', returnTo?: string) => {
+    const params = new URLSearchParams();
+    if (returnTo) params.set('returnTo', returnTo);
+    const query = params.toString();
+    return `${API_BASE}/auth/${provider}${query ? `?${query}` : ''}`;
+  },
+
   updateProfile: (payload: Partial<{
     experienceBand: ExperienceBand;
     language: LanguagePreference;

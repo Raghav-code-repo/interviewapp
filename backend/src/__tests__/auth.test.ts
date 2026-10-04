@@ -111,7 +111,13 @@ describe('POST /api/auth/register', () => {
     const serialised = JSON.stringify(res.json);
 
     expect(serialised).not.toContain('passwordHash');
-    expect(serialised).not.toContain('password');
+    // The bare word "password" is legitimate now: `providers` advertises which
+    // login methods work ("password", "google"). What must never appear is hash
+    // material, so assert on the bcrypt markers instead of the plain word.
+    expect(serialised).not.toContain('$2a$');
+    expect(serialised).not.toContain('$2b$');
+    expect(serialised).not.toContain('$2y$');
+    expect(serialised).not.toContain(validRegistration.password);
   });
 
   it('hashes the password with bcrypt instead of storing it verbatim', async () => {
@@ -122,9 +128,12 @@ describe('POST /api/auth/register', () => {
     const stored = await findUserByEmail('ada.lovelace@devpath.io');
 
     expect(stored).not.toBeNull();
+    // passwordHash is nullable now (social-only accounts have none), but a user
+    // created through /register must always have a real bcrypt hash.
+    expect(stored?.passwordHash).not.toBeNull();
     expect(stored?.passwordHash).not.toBe('analytical1');
-    expect(stored?.passwordHash.startsWith('$2')).toBe(true);
-    await expect(bcrypt.compare('analytical1', stored!.passwordHash)).resolves.toBe(true);
+    expect(stored?.passwordHash?.startsWith('$2')).toBe(true);
+    await expect(bcrypt.compare('analytical1', stored!.passwordHash!)).resolves.toBe(true);
   });
 
   it('normalises the email to lowercase so duplicates are case-insensitive', async () => {

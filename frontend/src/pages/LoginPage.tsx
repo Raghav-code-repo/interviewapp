@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AlertCircle, LogIn } from 'lucide-react';
 import { AuthLayout } from '../components/auth/AuthLayout';
+import { SocialAuthButtons } from '../components/auth/SocialAuthButtons';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { useAuth } from '../context/AuthContext';
@@ -184,6 +185,8 @@ export const LoginPage: React.FC = () => {
           {!isSubmitting && <LogIn className="w-4 h-4" />}
           {isSubmitting ? 'Signing in...' : 'Sign in'}
         </Button>
+
+        <SocialAuthButtons mode="login" />
 
         <div className="p-3 rounded-lg bg-slate-100 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
           <div className="flex items-center justify-between gap-3">

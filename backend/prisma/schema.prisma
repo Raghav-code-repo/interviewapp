@@ -10,15 +10,21 @@ generator client {
 
 // 1. User Account
 model User {
-  id           String            @id @default(uuid())
-  email        String            @unique
-  passwordHash String
+  id       String  @id @default(uuid())
+  email    String  @unique
+  // Nullable so a social-only user (Google/Facebook, never registered with a
+  // password) can exist. A user who has both a password and a social login keeps
+  // their hash; linking never overwrites or clears it.
+  passwordHash String?
   name         String
-  role         String            @default("candidate") // "candidate" | "admin"
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  // Provider avatar URL, refreshed on each social login when the provider sends one.
+  profileImage String?
+  role         String       @default("candidate") // "candidate" | "admin"
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   profile      CandidateProfile?
+  accounts     Account[]
   bookmarks    Bookmark[]
   progress     LearningProgress[]
   revisions    RevisionSchedule[]
@@ -26,6 +32,23 @@ model User {
   mockSessions MockInterview[]
 
   @@index([email])
+}
+
+// 1b. Linked OAuth identity.
+//
+// One DevPath User can hold many rows here (a password user who later connects
+// Google and Facebook still has exactly one User). @@unique on the provider
+// pair is what prevents the same provider identity being attached twice.
+model Account {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider          String // "google" | "facebook"
+  providerAccountId String
+  createdAt         DateTime @default(now())
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 // 2. Candidate Profile
